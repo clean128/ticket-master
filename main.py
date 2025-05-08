@@ -1,4 +1,3 @@
-
 import base64
 import hashlib
 import json
@@ -6,7 +5,7 @@ import os
 import re
 import time
 import threading
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlencode
 
 from bs4 import BeautifulSoup
 import tls_client
@@ -20,9 +19,15 @@ class TMOutlook:
     def __init__(self, account):
         self.data = account
         self.session = None
-        self.code_verifier = None
+        # Generate code_verifier and code_challenge once during initialization
+        self.code_verifier = pkce.generate_code_verifier(length=43)
+        # Manually compute code_challenge to ensure PKCE compliance
+        sha256_hash = hashlib.sha256(self.code_verifier.encode()).digest()
+        self.code_challenge = base64.urlsafe_b64encode(sha256_hash).decode().rstrip("=")
+        
+        print(f"INIT - code_verifier: {self.code_verifier}")
+        print(f"INIT - code_challenge: {self.code_challenge}")
         self.request_id = str(uuid.uuid4())
-        self.code_challenge = None
 
     def run(self):
         try:
@@ -35,9 +40,7 @@ class TMOutlook:
                     'TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384'
                 ]
             )
-            self.code_verifier = pkce.generate_code_verifier(length=43)
-            self.code_challenge = pkce.get_code_challenge(self.code_verifier)
-                      
+            
             state_data = {
                 "id": os.urandom(8).hex(),
                 "meta": {"interactionType": "redirect"}
@@ -48,15 +51,14 @@ class TMOutlook:
             print("code_verifier:", self.code_verifier)
             print("state:", state)
             print("nonce:", nonce)
-            self.login(self.data[0], self.data[1],state, nonce)
+            self.login(self.data[0], self.data[1], state, nonce)
         except Exception as e:
             log(f"[ERROR] Exception occurred in run loop: {e}")
         finally:
             log("Close Tls Client Session...")
             self.session.close()
             
-
-    def login(self, username, password,state, nonce):
+    def login(self, username, password, state, nonce):
         log(f"Trying to login... username:{username} password: {password}")
         first_headers = {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -79,50 +81,48 @@ class TMOutlook:
             "scope": "https://outlook.office.com/.default openid profile offline_access",
             "redirect_uri": "https://outlook.live.com/mail/",
             "response_type": "code",
-            "state": state,
             "response_mode": "fragment",
+            "state": state,
             "nonce": nonce,
-            "code_challenge": f"{self.code_challenge}",
+            "code_challenge": self.code_challenge,
             "code_challenge_method": "S256",
-            "x-client-SKU": "msal.js.browser",
-            "x-client-Ver": "4.4.0",
-            "uaid": self.request_id,
-            "msproxy": "1",
-            "issuer": "mso",
-            "tenant": "common",
-            "ui_locales": "en-US",
-            "client_info": "1",
-            "jshs": "1",
-            "fl": "dob,flname,wld",
-            "cobrandid": "ab0455a0-8d03-46b9-b18b-df2f57b9e44c",
-            "claims": '{"access_token":{"xms_cc":{"values":["CP1"]}}}',
-            "username": f"{username}",
-            "login_hint": f"{username}",
+            "login_hint": username
         }
-        response  = self.session.get("https://login.live.com/oauth20_authorize.srf", params = params, headers = first_headers)
+        # Log the exact code_challenge being sent
+        print(f"Sending code_challenge: {self.code_challenge}")
+        auth_url = "https://login.live.com/oauth20_authorize.srf?" + urlencode(params)
+        print(f"Authorization URL: {auth_url}")
+        response = self.session.get("https://login.live.com/oauth20_authorize.srf", params=params, headers=first_headers)
+        
+        # Log response details for debugging
+        print(f"Authorization response status: {response.status_code}")
+        print(f"Authorization response headers: {response.headers}")
+        with open('auth_response.html', 'w', encoding='utf-8') as file:
+            file.write(response.text)
+        
         if response.status_code == 200:
             print("Go to next step")
             with open('login.html', 'w', encoding='utf-8') as file:
                 file.write(response.text)
-            pass_headers ={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Cache-Control': 'max-age=0',
-                    'Connection': 'keep-alive',
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Origin': 'https://login.live.com',
-                    'referer': response.url,
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'same-origin',
-                    'Sec-Fetch-User': '?1',
-                    'Upgrade-Insecure-Requests': '1',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-                    'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-                    'sec-ch-ua-mobile': '?0',
-                    'sec-ch-ua-platform': '"Windows"',
-                    'sec-ch-ua-platform-version': '"10.0.0"',
-                }
+            pass_headers = {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Cache-Control': 'max-age=0',
+                'Connection': 'keep-alive',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Origin': 'https://login.live.com',
+                'Referer': response.url,
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+                'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-ch-ua-platform-version': '"10.0.0"'
+            }
             ppft_input = re.search(r'name="PPFT"\s+id="[^"]*"\s+value="([^"]+)"', response.text)
             if ppft_input:
                 ppft_value = ppft_input.group(1)
@@ -132,55 +132,55 @@ class TMOutlook:
                     url_post_msa = match.group(1)
                     print("urlPostMsa:", url_post_msa)
                     form_data = {
-                        "ps":2,
-                        "psRNGCDefaultType":"",
-                        "psRNGCEntropy":"",
-                        "psRNGCSLK":"",
-                        "canary":"",
-                        "ctx":"",
-                        "hpgrequestid":"",
-                        "PPFT":ppft_value,
-                        "PPSX":"Pas",
-                        "NewUser":"1",
-                        "FoundMSAs":"",
-                        "fspost":0,
-                        "i21":0,
-                        "CookieDisclosure":0,
-                        "IsFidoSupported":1,
-                        "isSignupPost":0,
-                        "isRecoveryAttemptPost":0,
-                        "i13":0,
-                        "login":username,
-                        "loginfmt":username,
-                        "type":11,
-                        "LoginOptions":3,
-                        "lrt":"",
-                        "lrtPartition":"",
-                        "hisRegion":"",
-                        "hisScaleUnit":"",
-                        "passwd":password,
+                        "ps": "2",
+                        "psRNGCDefaultType": "",
+                        "psRNGCEntropy": "",
+                        "psRNGCSLK": "",
+                        "canary": "",
+                        "ctx": "",
+                        "hpgrequestid": "",
+                        "PPFT": ppft_value,
+                        "PPSX": "Pas",
+                        "NewUser": "1",
+                        "FoundMSAs": "",
+                        "fspost": "0",
+                        "i21": "0",
+                        "CookieDisclosure": "0",
+                        "IsFidoSupported": "1",
+                        "isSignupPost": "0",
+                        "isRecoveryAttemptPost": "0",
+                        "i13": "0",
+                        "login": username,
+                        "loginfmt": username,
+                        "type": "11",
+                        "LoginOptions": "3",
+                        "lrt": "",
+                        "lrtPartition": "",
+                        "hisRegion": "",
+                        "hisScaleUnit": "",
+                        "passwd": password
                     }
-                    pass_response = self.session.post(url_post_msa, headers = pass_headers, data = form_data)
-                    print("pass_response.status_code",pass_response.status_code)
+                    pass_response = self.session.post(url_post_msa, headers=pass_headers, data=form_data)
+                    print("pass_response.status_code", pass_response.status_code)
                     with open('password.html', 'w', encoding='utf-8') as file:
                         file.write(pass_response.text)
                     if pass_response.status_code == 200:
                         sErrTxt_match = re.search(r"sErrTxt:\s*'([^']+)'", pass_response.text)
                         if sErrTxt_match:
                             sErrTxt = sErrTxt_match.group(1)
-                            if "incorrect account or password." in sErrTxt or "account or password is incorrect"  in sErrTxt:
-                                print("We can't sign you in")    
+                            if "incorrect account or password." in sErrTxt or "account or password is incorrect" in sErrTxt:
+                                print("We can't sign you in")
                         else:
                             log(f"Successfully signed in with username :{username}")
                             match = re.search(r"sFT:\s*'([^']+)'", pass_response.text)
                             if match:
-                                form_Data = {
-                                    "PPFT":match.group(1),
-                                    "canary":"",
-                                    "LoginOptions":3,
-                                    "type":28,
-                                    "hpgrequestid":"",
-                                    "ctx":"",
+                                form_data = {
+                                    "PPFT": match.group(1),
+                                    "canary": "",
+                                    "LoginOptions": "3",
+                                    "type": "28",
+                                    "hpgrequestid": "",
+                                    "ctx": ""
                                 }
                                 ppsecure_headers = {
                                     'Cache-Control': 'max-age=0',
@@ -198,86 +198,84 @@ class TMOutlook:
                                     'Sec-Fetch-Dest': 'document',
                                     'Accept-Language': 'en-US,en;q=0.9',
                                     'Content-Type': 'application/x-www-form-urlencoded',
-                                    'referer':pass_response.url
+                                    'Referer': pass_response.url
                                 }
-                                ppsecure_response = self.session.post(url_post_msa, headers = ppsecure_headers, data = form_Data)
+                                ppsecure_response = self.session.post(url_post_msa, headers=ppsecure_headers, data=form_data)
                                 print(ppsecure_response.status_code)
                                 if ppsecure_response.status_code == 200:
                                     if "continue" in ppsecure_response.text:
                                         print("Continuing")
-                                        soup  = BeautifulSoup(ppsecure_response.text,'html.parser')
+                                        soup = BeautifulSoup(ppsecure_response.text, 'html.parser')
                                         data = {}
                                         for input_tag in soup.find_all('input'):
                                             name = input_tag.get('name')
                                             value = input_tag.get('value')
                                             data[name] = value
-
                                         print(data)
                                         final_headers = {
-                                            'cache-control': 'max-age=0',
+                                            'Cache-Control': 'max-age=0',
                                             'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
                                             'sec-ch-ua-mobile': '?0',
                                             'sec-ch-ua-platform': '"Windows"',
-                                            'origin': 'https://login.live.com',
-                                            'content-type': 'application/x-www-form-urlencoded',
-                                            'upgrade-insecure-requests': '1',
-                                            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-                                            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                                            'sec-fetch-site': 'cross-site',
-                                            'sec-fetch-mode': 'navigate',
-                                            'sec-fetch-dest': 'document',
-                                            'referer': 'https://login.live.com/',
-                                            'accept-language': 'en-US,en;q=0.9',
-                                            'priority': 'u=0, i'
+                                            'Origin': 'https://login.live.com',
+                                            'Content-Type': 'application/x-www-form-urlencoded',
+                                            'Upgrade-Insecure-Requests': '1',
+                                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+                                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                                            'Sec-Fetch-Site': 'cross-site',
+                                            'Sec-Fetch-Mode': 'navigate',
+                                            'Sec-Fetch-Dest': 'document',
+                                            'Referer': 'https://login.live.com/',
+                                            'Accept-Language': 'en-US,en;q=0.9',
+                                            'Priority': 'u=0, i'
                                         }
-                                        final_response = self.session.post("https://login.microsoftonline.com/consumers/savestate", data = data, headers = final_headers)
+                                        final_response = self.session.post("https://login.microsoftonline.com/consumers/savestate", data=data, headers=final_headers)
                                         if final_response.status_code == 302:
-                                            log("Successfully signd in to site")     
-                                            print(final_response.text)                
+                                            log("Successfully signed in to site")
+                                            print(final_response.text)
                                 elif ppsecure_response.status_code == 302:
-                                    print("redirected",ppsecure_response.headers.get("Location"))
+                                    print("redirected", ppsecure_response.headers.get("Location"))
                                     self.redirect_mail(ppsecure_response.headers.get("Location"))
                             else:
                                 match_ppft = re.search(r'name="PPFT"\s+id="[^"]*"\s+value="([^"]+)"', pass_response.text)
                                 if match_ppft:
                                     log("You've tried to sign in too many times")
                                 else:
-                                    soup = BeautifulSoup(pass_response.text,'html.parser')   
-                                    form = soup.find("form")   
+                                    soup = BeautifulSoup(pass_response.text, 'html.parser')
+                                    form = soup.find("form")
                                     form_action = form.get("action")
-                                    form_data = {}    
+                                    form_data = {}
                                     for input_tag in soup.find_all('input'):
                                         name = input_tag.get('name')
                                         value = input_tag.get('value')
                                         form_data[name] = value
                                     headers = {
-                                        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                                        'accept-language': 'en-US,en;q=0.9',
-                                        'cache-control': 'max-age=0',
-                                        'content-type': 'application/x-www-form-urlencoded',
-                                        'origin': 'https://login.live.com',
-                                        'priority': 'u=0, i',
-                                        'referer': 'https://login.live.com/',
+                                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                                        'Accept-Language': 'en-US,en;q=0.9',
+                                        'Cache-Control': 'max-age=0',
+                                        'Content-Type': 'application/x-www-form-urlencoded',
+                                        'Origin': 'https://login.live.com',
+                                        'Priority': 'u=0, i',
+                                        'Referer': 'https://login.live.com/',
                                         'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
                                         'sec-ch-ua-mobile': '?0',
                                         'sec-ch-ua-platform': '"Windows"',
-                                        'sec-fetch-dest': 'document',
-                                        'sec-fetch-mode': 'navigate',
-                                        'sec-fetch-site': 'same-site',
-                                        'upgrade-insecure-requests': '1',
-                                        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+                                        'Sec-Fetch-Dest': 'document',
+                                        'Sec-Fetch-Mode': 'navigate',
+                                        'Sec-Fetch-Site': 'same-site',
+                                        'Upgrade-Insecure-Requests': '1',
+                                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
                                     }
-                                    response = self.session.post(form_action, headers = headers, data = form_data)
+                                    response = self.session.post(form_action, headers=headers, data=form_data)
                                     print(response.status_code)
                                     with open('stay.html', 'w', encoding='utf-8') as file:
-                                                file.write(response.text)
+                                        file.write(response.text)
                                     if response.status_code == 200:
-                                        # find skipUrl
                                         skip_url_match = re.search(r'"skipUrl"\s*:\s*"([^"]+)"', response.text)
                                         if skip_url_match:
                                             skip_url = html.unescape(skip_url_match.group(1))
                                             print("skipUrl:", skip_url)
-                                            oauth_response = self.session.get(skip_url, headers = headers )
+                                            oauth_response = self.session.get(skip_url, headers=headers)
                                             print(oauth_response.status_code)
                                             with open('oauth.html', 'w', encoding='utf-8') as file:
                                                 file.write(oauth_response.text)
@@ -285,14 +283,13 @@ class TMOutlook:
                                             sFT_match = re.search(r"sFT:\s*'([^']+)'", oauth_response.text)
                                             if urlPost_match and sFT_match:
                                                 urlPost = urlPost_match.group(1)
-                                                
                                                 url_post_form_data = {
-                                                    "PPFT":sFT_match.group(1),
-                                                    "canary":"",
-                                                    "LoginOptions":3,
-                                                    "type":28,
-                                                    "hpgrequestid":"",
-                                                    "ctx":"",
+                                                    "PPFT": sFT_match.group(1),
+                                                    "canary": "",
+                                                    "LoginOptions": "3",
+                                                    "type": "28",
+                                                    "hpgrequestid": "",
+                                                    "ctx": ""
                                                 }
                                                 headers = {
                                                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -301,7 +298,7 @@ class TMOutlook:
                                                     'Connection': 'keep-alive',
                                                     'Content-Type': 'application/x-www-form-urlencoded',
                                                     'Origin': 'https://login.live.com',
-                                                    'Referer': oauth_response.url ,
+                                                    'Referer': oauth_response.url,
                                                     'Sec-Fetch-Dest': 'document',
                                                     'Sec-Fetch-Mode': 'navigate',
                                                     'Sec-Fetch-Site': 'same-origin',
@@ -311,35 +308,31 @@ class TMOutlook:
                                                     'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
                                                     'sec-ch-ua-mobile': '?0',
                                                     'sec-ch-ua-platform': '"Windows"',
-                                                    'sec-ch-ua-platform-version': '"10.0.0"',
+                                                    'sec-ch-ua-platform-version': '"10.0.0"'
                                                 }
-                                                urlPost_response = self.session.post(urlPost, headers = headers,data = url_post_form_data)
+                                                urlPost_response = self.session.post(urlPost, headers=headers, data=url_post_form_data)
                                                 print(urlPost_response.status_code)
-                                                
                                                 print(urlPost_response.headers.get("Location"))
                                                 if urlPost_response.status_code == 302:
-                                                    print("second redirect",urlPost_response.headers.get("Location"))
+                                                    print("second redirect", urlPost_response.headers.get("Location"))
                                                     self.redirect_mail(urlPost_response.headers.get("Location"))
-
                                                 elif urlPost_response.status_code == 200:
                                                     with open('o_0auth.html', 'w', encoding='utf-8') as file:
                                                         file.write(urlPost_response.text)
                                             else:
-                                                print("not found ")
+                                                print("urlPost or sFT not found")
                                         else:
-                                            print("skipUrl not found.")
-                                    
-
+                                            print("skipUrl not found")
+                    else:
+                        print("urlPostMsa not found")
                 else:
-                    print("urlPostMsa not found")
-            else:
-                print("PPFT input not found")
+                    print("PPFT input not found")
 
     def redirect_mail(self, url):
         print("redirect mail")
+        print(f"REDIRECT - code_verifier: {self.code_verifier}")
         print(url)
-        print("code_verifier",self.code_verifier)
-
+        print("code_verifier", self.code_verifier)
         headers = {
             'Cache-Control': 'max-age=0',
             'sec-ch-ua': '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
@@ -356,40 +349,35 @@ class TMOutlook:
             'Sec-Fetch-Dest': 'document',
             'Accept-Language': 'en-US,en;q=0.9',
         }
-        mail_response = self.session.get(url, headers = headers)
+        mail_response = self.session.get(url, headers=headers)
         print(mail_response.status_code)
         if mail_response.status_code == 200:
             with open('mail_200.html', 'w', encoding='utf-8') as file:
                 file.write(mail_response.text)
             log(f"Successfully logged in to mailbox with ${mail_response.status_code}")
-
         elif mail_response.status_code == 302:
-            final_response = self.session.get(mail_response.headers.get("Location"), headers = headers, allow_redirects = True)
+            final_response = self.session.get(mail_response.headers.get("Location"), headers=headers, allow_redirects=True)
             print(final_response.status_code)
             with open('mail_302.html', 'w', encoding='utf-8') as file:
                 file.write(final_response.text)
             log("Successfully logged in to mailbox")   
-            request_params ={
-                "client-request-id":self.request_id
-            }
+            
             fragment = urlparse(url).fragment
             params = parse_qs(fragment)
             code = params.get('code', [None])[0]
-            payload= {
-                "client_id":"9199bf20-a13f-4107-85dc-02114787ef48",
-                "redirect_uri":"https://outlook.live.com/mail/",
-                "scope":"https://outlook.office.com/.default openid profile offline_access",
-                "code":code,
-                "x-client-SKU":"msal.js.browser",
-                "x-client-VER":"4.4.0",
-                "x-ms-lib-capability":"retry-after, h429",
-                "x-client-current-telemetry":"5|865,0,,,|,",
-                "x-client-last-telemetry":"5|0|||0,0",
-                "code_verifier":self.code_verifier, 
-                "grant_type":"authorization_code",
-                "client_info":"1",
-                "claims":'{"access_token":{"xms_cc":{"values":["CP1"]}}}',
-                "X-AnchorMailbox":"Oid:00000000-0000-0000-c632-750395a5618f@9188040d-6c67-4c5b-b112-36a304b66dad", # change this
+            
+            request_params = {
+                "client-request-id": self.request_id
+            }
+            
+            payload = {
+                "client_id": "9199bf20-a13f-4107-85dc-02114787ef48",
+                "redirect_uri": "https://outlook.live.com/mail/",
+                "scope": "https://outlook.office.com/.default openid profile offline_access",
+                "code": code,
+                "code_verifier": self.code_verifier,
+                "grant_type": "authorization_code",
+                "client_info": "1"
             }
             refresh_headers = {
                 'accept': '*/*',
@@ -406,17 +394,25 @@ class TMOutlook:
                 'sec-fetch-site': 'cross-site',
                 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
             }
-            refresh_token_response = self.session.post("https://login.microsoftonline.com/common/oauth2/v2.0/token", 
-                                                       params = request_params, 
-                                                       data = payload, 
-                                                       headers = refresh_headers)
+            print(f"Token request payload: {payload}")
+            refresh_token_response = self.session.post("https://login.live.com/oauth20_token.srf", 
+                                                    params=request_params, 
+                                                    data=payload, 
+                                                    headers=refresh_headers)
             print(refresh_token_response.status_code)
-            refresh_token_data = refresh_token_response.json()
+            print(f"Token response text: {refresh_token_response.text}")
+            
             if refresh_token_response.status_code == 200:
+                refresh_token_data = refresh_token_response.json()
                 refresh_token = refresh_token_data['refresh_token']
-                print("refresh_token",refresh_token)
+                print("refresh_token", refresh_token)
             elif refresh_token_response.status_code == 400:
-                print(f"{refresh_token_data['error_description']}")
+                try:
+                    refresh_token_data = refresh_token_response.json()
+                    print(f"Error: {refresh_token_data.get('error', '')}")
+                    print(f"Description: {refresh_token_data.get('error_description', '')}")
+                except ValueError:
+                    print(f"Error response: {refresh_token_response.text}")
 
     def get_rules(self):
         url = "https://outlook.live.com/owa/0/service.svc?action=GetInboxRule&app=Mail&n=79"
@@ -442,12 +438,11 @@ class TMOutlook:
             'x-anchormailbox': 'PUID:000640008EC8648E^@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa',
             'x-owa-correlationid': 'b35acd82-faca-c001-01f3-536153b9963b',
             'x-owa-hosted-ux': 'false',
-            'x-owa-sessionid': 'c460f0e3-7c5e-4452-8187-1b8eadba4d66',
             'x-owa-urlpostdata': '%7B%22__type%22%3A%22GetInboxRuleRequest%3A%23Exchange%22%2C%22Header%22%3A%7B%22__type%22%3A%22JsonRequestHeaders%3A%23Exchange%22%2C%22RequestServerVersion%22%3A%22V2018_01_08%22%2C%22TimeZoneContext%22%3A%7B%22__type%22%3A%22TimeZoneContext%3A%23Exchange%22%2C%22TimeZoneDefinition%22%3A%7B%22__type%22%3A%22TimeZoneDefinitionType%3A%23Exchange%22%2C%22Id%22%3A%22Belarus%20Standard%20Time%22%7D%7D%7D%2C%22UseServerRulesLoader%22%3Atrue%7D',
             'x-req-source': 'Mail',
             'x-tenantid': '84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa',
         }
-        response = self.session.post(url, headers = headers) 
+        response = self.session.post(url, headers=headers) 
         print("get_rules")
         print(response.status_code)
         print(response.text)
@@ -483,12 +478,10 @@ class TMOutlook:
             'x-req-source': 'Mail',
             'x-tenantid': '84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa',
         }
-        response = self.session.post(url, headers = headers) 
+        response = self.session.post(url, headers=headers) 
         print(response.status_code)
         if response.status_code == 200:
             print(response.json())
-
-
 
 if __name__ == "__main__":
     data = load_accounts('email.txt')
@@ -512,7 +505,7 @@ if __name__ == "__main__":
     ]
     for i in range(1):
         tmoutlook = TMOutlook(
-            account = data[i]
+            account=data[i]
         )
         process = threading.Thread(target=tmoutlook.run, args=())
         log(f'Starting Bot ')
