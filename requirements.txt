@@ -1,3 +1,4 @@
-beautifulsoup4
-tls-client
-pkce
+flask==3.0.3
+tls-client==1.0.1
+beautifulsoup4==4.12.3
+pkce==1.0.2

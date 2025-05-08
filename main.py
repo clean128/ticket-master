@@ -6,25 +6,44 @@ import re
 import time
 import threading
 from urllib.parse import parse_qs, urlparse, urlencode
-
+from flask import Flask
 from bs4 import BeautifulSoup
 import tls_client
 from utils import load_accounts, log
 import uuid
 import html
 import pkce
+
+app = Flask(__name__)
 email_data = []
+
+# Define header_order globally to avoid NameError
+header_order = [
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "origin",
+    "upgrade-insecure-requests",
+    "content-type",
+    "user-agent",
+    "accept",
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-user",
+    "sec-fetch-dest",
+    "accept-encoding",
+    "accept-language",
+    "cookie",
+    "priority"
+]
 
 class TMOutlook:
     def __init__(self, account):
         self.data = account
         self.session = None
-        # Generate code_verifier and code_challenge once during initialization
         self.code_verifier = pkce.generate_code_verifier(length=43)
-        # Manually compute code_challenge to ensure PKCE compliance
         sha256_hash = hashlib.sha256(self.code_verifier.encode()).digest()
         self.code_challenge = base64.urlsafe_b64encode(sha256_hash).decode().rstrip("=")
-        
         print(f"INIT - code_verifier: {self.code_verifier}")
         print(f"INIT - code_challenge: {self.code_challenge}")
         self.request_id = str(uuid.uuid4())
@@ -36,18 +55,11 @@ class TMOutlook:
                 force_http1=True,
                 random_tls_extension_order=True,
                 header_order=header_order,
-                supported_signature_algorithms=[
-                    'TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384'
-                ]
+                supported_signature_algorithms=['TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384']
             )
-            
-            state_data = {
-                "id": os.urandom(8).hex(),
-                "meta": {"interactionType": "redirect"}
-            }
+            state_data = {"id": os.urandom(8).hex(), "meta": {"interactionType": "redirect"}}
             state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
             nonce = str(uuid.uuid4())
-            
             print("code_verifier:", self.code_verifier)
             print("state:", state)
             print("nonce:", nonce)
@@ -56,8 +68,9 @@ class TMOutlook:
             log(f"[ERROR] Exception occurred in run loop: {e}")
         finally:
             log("Close Tls Client Session...")
-            self.session.close()
-            
+            if self.session is not None:
+                self.session.close()
+
     def login(self, username, password, state, nonce):
         log(f"Trying to login... username:{username} password: {password}")
         first_headers = {
@@ -88,18 +101,14 @@ class TMOutlook:
             "code_challenge_method": "S256",
             "login_hint": username
         }
-        # Log the exact code_challenge being sent
         print(f"Sending code_challenge: {self.code_challenge}")
         auth_url = "https://login.live.com/oauth20_authorize.srf?" + urlencode(params)
         print(f"Authorization URL: {auth_url}")
         response = self.session.get("https://login.live.com/oauth20_authorize.srf", params=params, headers=first_headers)
-        
-        # Log response details for debugging
         print(f"Authorization response status: {response.status_code}")
         print(f"Authorization response headers: {response.headers}")
         with open('auth_response.html', 'w', encoding='utf-8') as file:
             file.write(response.text)
-        
         if response.status_code == 200:
             print("Go to next step")
             with open('login.html', 'w', encoding='utf-8') as file:
@@ -221,7 +230,7 @@ class TMOutlook:
                                             'Content-Type': 'application/x-www-form-urlencoded',
                                             'Upgrade-Insecure-Requests': '1',
                                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
-                                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/scom/signed-exchange;v=b3;q=0.7',
                                             'Sec-Fetch-Site': 'cross-site',
                                             'Sec-Fetch-Mode': 'navigate',
                                             'Sec-Fetch-Dest': 'document',
@@ -360,16 +369,11 @@ class TMOutlook:
             print(final_response.status_code)
             with open('mail_302.html', 'w', encoding='utf-8') as file:
                 file.write(final_response.text)
-            log("Successfully logged in to mailbox")   
-            
+            log("Successfully logged in to mailbox")
             fragment = urlparse(url).fragment
             params = parse_qs(fragment)
             code = params.get('code', [None])[0]
-            
-            request_params = {
-                "client-request-id": self.request_id
-            }
-            
+            request_params = {"client-request-id": self.request_id}
             payload = {
                 "client_id": "9199bf20-a13f-4107-85dc-02114787ef48",
                 "redirect_uri": "https://outlook.live.com/mail/",
@@ -395,13 +399,12 @@ class TMOutlook:
                 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
             }
             print(f"Token request payload: {payload}")
-            refresh_token_response = self.session.post("https://login.live.com/oauth20_token.srf", 
-                                                    params=request_params, 
-                                                    data=payload, 
-                                                    headers=refresh_headers)
+            refresh_token_response = self.session.post("https://login.live.com/oauth20_token.srf",
+                                                      params=request_params,
+                                                      data=payload,
+                                                      headers=refresh_headers)
             print(refresh_token_response.status_code)
             print(f"Token response text: {refresh_token_response.text}")
-            
             if refresh_token_response.status_code == 200:
                 refresh_token_data = refresh_token_response.json()
                 refresh_token = refresh_token_data['refresh_token']
@@ -420,7 +423,7 @@ class TMOutlook:
             'accept': '*/*',
             'accept-language': 'en-US,en;q=0.9',
             'action': 'GetInboxRule',
-            'authorization': 'MSAuth1.0 usertoken="EwAYBOl3BAAUcDnR9grBJokeAHaUV8R3+rVHX+IAAV2YTMXd9cuFj2UPIF7JAt1UppD9mTbRk1T8dIm6gFjwkbtG+e3d4x4NYtUjr61NmNMO3ihWjW+2iSObs2IQsHE2IFObUL6OsDGJ3tZfijK5Hh/nTu5sC64brt+h4gECbTfLETTnpr8t2EYUQFrc5lzdLb1+rXsGEkywy41vVDogJrbB7zBrLfnyZ+ouZNUtQxBUvieg2jOK0Cv5KJK1LecEJhmduDvISKKXzo/JdrMgmbFS2s2TQT1FG7NT5udnU82g9cye3/346/h8G3D2VpESDLWpb8okgRDOUOz2XDMchZADp7RgpDdCROOMzxUL/xBRVaf7tO0Lrg98W/EhiQcQZgAAEKlmzx0dZM/fVZ4cCsv+LzjgApbY5eOKopXVaSG8V1IEXXzwYkHkM2uHuZEFV3Z1plQoTt34AOU0ILDLs4xjkR/8H+PWNLXBn+X41PJSL5JrmzCyVGV+fCEB2p4mqQ18XGPy/fwifaa8H7JSZkL7RyHqFepX4JAbJpkz2SMA0taU1a82Oh/LYFqcRrz4HYdwWwnEuLeT4IlPxLGEea9DhpzJ8o5teXlT7pHN/GKQXfT6rGKxojGhd+KVPAwUjPvwKhnf0Nx5JVfkqTQvLHo+EEH6yurkaiU6r4fbxwaGXu7QxrB7zRJql8u3ced6nv3tqOxjLlksbM7DhCic8K2N0g10USUXOOAokk4q649b233GLHlByz8mQitOEE16JKhDXPy8CAzenH+ZJrcJEFFA8sltnw/xYUEGbMefh45utYJcr0H6hVbxShzFTLOD6mWzPCPme+TjTftAjGkGOi87i1puzgt0m/EU45cVbU+9g7i1g8YkpP1E1284iBkdZDeYCzoOAJhJGTQyZjXMg2xGVLo0dsv/Xovt4eatd4b0HH+751xbvtt2Bz+ZmtXtXCgQrV6oZUWyAun5KUOA3C8wkUvNyUbnkAHTZcDhqI6Uwfe2hzgScUtk35pT5il4tvysiHdBTF+ry9wdOwBtYH811ZPBvLKBhk+5SUsIIHpRo0OQeQuKjCMklLVBHYaHcePgotpn6fXs/uqRtyvnMVmXkdDM4voRoQdl8glMkRMuTYgNLC9aPgc78i4ZAOrc13SLnPHXYovpceZd1IA2NRirokhfS38f6ntoU1IJExMbcVjpzAUfHl55DToW2WaLhMh/IVhezkDDblg1k0Pw7zvlLXujaZ1iKu5gqB49/3dpHFQRQHJFf7SsICOmcsEijAN5LA4Ov25fAyXL83ovoAef+dJMqN/dYzHyzld3/9kPYDajK9ANZF30Dzf4Qf164B1DjGsALu+FJx/QxFr2DdAJjT39o+wopmcJIvNZHSAhW1hrnbYgAw==", type="MSACT"',
+            'authorization': 'MSAuth1.0 usertoken="EwAYBOl3BAAUcDnR9grBJokeAHaUV8R3+rVHX+IAAV2YTMXd9cuFj2UPIF7JAt1UppD9mTbRk1T8dIm6gFjwkbtG+e3d4x4NYtUjr61NmNMO3ihWjW+2iSObs2IQsHE2IFObUL6OsDGJ3tZfijK5Hh/nTu5sC64brt+h4gECbTfLETTnpr8t2EYUQFrc5lzdLb1+rXsGEkywy41vVDogJrbB7zBrLfnyZ+ouZNUtQxBUvieg2jOK0Cv5KJK1LecEJhmduDvISKKXzo/JdrMgmbFS2s2TQT1FG7NT5udnU82g9cye3/346/h8G3D2VpESDLWpb8okgRDOUOz2XDMchZADp7RgpDdCROOMzxUL/xBRVaf7tO0Lrg98W/EhiQcQZgAAEKlmzx0dZM/fVZ4cCsv+LzjgApbY5eOKopXVaSG8V1IEXXzwYkHkM2uHuZEFV3Z1plQoTt34AOU0ILDLs4xjkR/8H+PWNLXBn+X41PJSL5JrmzCyVGV+fCEB2p4mqQ18XGPy/fwifaa8H7JSZkL7RyHqFepX4JAbJpkz2SMA0taU1a82Oh/LYFqcRrz4HYdwWwnEuLeT4IlPxLGEea9DhpzJ8o5teXlT7pHN/GKQXfT6rGKxojGhd+KVPAwUjPvwKhnf0Nx5JVfkqTQvLHo+EEH6yurkaiU6r4fbxwaGXu7QxrB7zRJql8u3ced6nv3tqOxjLlksbM7DhCic8K2N0g10USUXOOAokk4q649b233GLHlByz8mQitOEE16JKhDXPy8CAzenH+ZJrcJEFFA8sltnw/xYUEGbMefh45utYJcr0H6hVbxShzFTLOD6mWzPCPme+TjTftAjGkGOi87i1puzgt0m/EU45cVbU+9g7i1g8YkpP1E1284iBkdZDeYCzoOAJhJGTQyZjXMg2xGVLo0dsv/Xovt4eatd4b0HH+751xbvtt2Bz+ZmtXtXCgQrV6oZUWyAun5KUOA3C8wkUvNyUbnkAHTZcDhqI6Uwfe2hzgScUtk35pT5il4tvysiHdBTF+ry9wdOwBtYH811ZPBvLKBhk+5SUsIIHpRo0OQeQuKjCMklLVBHYaHcePgotpn6fXs/uqRtyvnMVmXkdDM4voRoQdl8glMkRMuTYgNLC9aPgc78i4ZAOrc13SLnPHXYovpceZd1IA2NRirokhfS38f6ntoU1IJExMbcVjpzAu5gqB49/3dpHFQRQHJFf7SsICOmcsEijAN5LA4Ov25fAyXL83ovoAef+dJMqN/dYzHyzld3/9kPYDajK9ANZF30Dzf4Qf164B1DjGsALu+FJx/QxFr2DdAJjT39o+wopmcJIvNZHSAhW1hrnbYgAw==", type="MSACT"',
             'content-length': '0',
             'content-type': 'application/json; charset=utf-8',
             'ms-cv': 'KuShXJ9KPtofsBEMa/qu+q.90',
@@ -442,7 +445,7 @@ class TMOutlook:
             'x-req-source': 'Mail',
             'x-tenantid': '84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa',
         }
-        response = self.session.post(url, headers=headers) 
+        response = self.session.post(url, headers=headers)
         print("get_rules")
         print(response.status_code)
         print(response.text)
@@ -455,7 +458,7 @@ class TMOutlook:
             'accept': '*/*',
             'accept-language': 'en-US,en;q=0.9',
             'action': 'RemoveInboxRule',
-            'authorization': 'MSAuth1.0 usertoken="EwAYBOl3BAAUcDnR9grBJokeAHaUV8R3+rVHX+IAAV2YTMXd9cuFj2UPIF7JAt1UppD9mTbRk1T8dIm6gFjwkbtG+e3d4x4NYtUjr61NmNMO3ihWjW+2iSObs2IQsHE2IFObUL6OsDGJ3tZfijK5Hh/nTu5sC64brt+h4gECbTfLETTnpr8t2EYUQFrc5lzdLb1+rXsGEkywy41vVDogJrbB7zBrLfnyZ+ouZNUtQxBUvieg2jOK0Cv5KJK1LecEJhmduDvISKKXzo/JdrMgmbFS2s2TQT1FG7NT5udnU82g9cye3/346/h8G3D2VpESDLWpb8okgRDOUOz2XDMchZADp7RgpDdCROOMzxUL/xBRVaf7tO0Lrg98W/EhiQcQZgAAEKlmzx0dZM/fVZ4cCsv+LzjgApbY5eOKopXVaSG8V1IEXXzwYkHkM2uHuZEFV3Z1plQoTt34AOU0ILDLs4xjkR/8H+PWNLXBn+X41PJSL5JrmzCyVGV+fCEB2p4mqQ18XGPy/fwifaa8H7JSZkL7RyHqFepX4JAbJpkz2SMA0taU1a82Oh/LYFqcRrz4HYdwWwnEuLeT4IlPxLGEea9DhpzJ8o5teXlT7pHN/GKQXfT6rGKxojGhd+KVPAwUjPvwKhnf0Nx5JVfkqTQvLHo+EEH6yurkaiU6r4fbxwaGXu7QxrB7zRJql8u3ced6nv3tqOxjLlksbM7DhCic8K2N0g10USUXOOAokk4q649b233GLHlByz8mQitOEE16JKhDXPy8CAzenH+ZJrcJEFFA8sltnw/xYUEGbMefh45utYJcr0H6hVbxShzFTLOD6mWzPCPme+TjTftAjGkGOi87i1puzgt0m/EU45cVbU+9g7i1g8YkpP1E1284iBkdZDeYCzoOAJhJGTQyZjXMg2xGVLo0dsv/Xovt4eatd4b0HH+751xbvtt2Bz+ZmtXtXCgQrV6oZUWyAun5KUOA3C8wkUvNyUbnkAHTZcDhqI6Uwfe2hzgScUtk35pT5il4tvysiHdBTF+ry9wdOwBtYH811ZPBvLKBhk+5SUsIIHpRo0OQeQuKjCMklLVBHYaHcePgotpn6fXs/uqRtyvnMVmXkdDM4voRoQdl8glMkRMuTYgNLC9aPgc78i4ZAOrc13SLnPHXYovpceZd1IA2NRirokhfS38f6ntoU1IJExMbcVjpzAUfHl55DToW2WaLhMh/IVhezkDDblg1k0Pw7zvlLXujaZ1iKu5gqB49/3dpHFQRQHJFf7SsICOmcsEijAN5LA4Ov25fAyXL83ovoAef+dJMqN/dYzHyzld3/9kPYDajK9ANZF30Dzf4Qf164B1DjGsALu+FJx/QxFr2DdAJjT39o+wopmcJIvNZHSAhW1hrnbYgAw==", type="MSACT"',
+            'authorization': 'MSAuth1.0 usertoken="EwAYBOl3BAAUcDnR9grBJokeAHaUV8R3+rVHX+IAAV2YTMXd9cuFj2UPIF7JAt1UppD9mTbRk1T8dIm6gFjwkbtG+e3d4x4NYtUjr61NmNMO3ihWjW+2iSObs2IQsHE2IFObUL6OsDGJ3tZfijK5Hh/nTu5sC64brt+h4gECbTfLETTnpr8t2EYUQFrc5lzdLb1+rXsGEkywy41vVDogJrbB7zBrLfnyZ+ouZNUtQxBUvieg2jOK0Cv5KJK1LecEJhmduDvISKKXzo/JdrMgmbFS2s2TQT1FG7NT5udnU82g9cye3/346/h8G3D2VpESDLWpb8okgRDOUOz2XDMchZADp7RgpDdCROOMzxUL/xBRVaf7tO0Lrg98W/EhiQcQZgAAEKlmzx0dZM/fVZ4cCsv+LzjgApbY5eOKopXVaSG8V1IEXXzwYkHkM2uHuZEFV3Z1plQoTt34AOU0ILDLs4xjkR/8H+PWNLXBn+X41PJSL5JrmzCyVGV+fCEB2p4mqQ18XGPy/fwifaa8H7JSZkL7RyHqFepX4JAbJpkz2SMA0taU1a82Oh/LYFqcRrz4HYdwWwnEuLeT4IlPxLGEea9DhpzJ8o5teXlT7pHN/GKQXfT6rGKxojGhd+KVPAwUjPvwKhnf0Nx5JVfkqTQvLHo+EEH6yurkaiU6r4fbxwaGXu7QxrB7zRJql8u3ced6nv3tqOxjLlksbM7DhCic8K2N0g10USUXOOAokk4q649b233GLHlByz8mQitOEE16JKhDXPy8CAzenH+ZJrcJEFFA8sltnw/xYUEGbMefh45utYJcr0H6hVbxShzFTLOD6mWzPCPme+TjTftAjGkGOi87i1puzgt0m/EU45cVbU+9g7i1g8YkpP1E1284iBkdZDeYCzoOAJhJGTQyZjXMg2xGVLo0dsv/Xovt4eatd4b0HH+751xbvtt2Bz+ZmtXtXCgQrV6oZUWyAun5KUOA3C8wkUvNyUbnkAHTZcDhqI6Uwfe2hzgScUtk35pT5il4tvysiHdBTF+ry9wdOwBtYH811ZPBvLKBhk+5SUsIIHpRo0OQeQuKjCMklLVBHYaHcePgotpn6fXs/uqRtyvnMVmXkdDM4voRoQdl8glMkRMuTYgNLC9aPgc78i4ZAOrc13SLnPHXYovpceZd1IA2NRirokhfS38f6ntoU1IJExMbcVjpzAu5gqB49/3dpHFQRQHJFf7SsICOmcsEijAN5LA4Ov25fAyXL83ovoAef+dJMqN/dYzHyzld3/9kPYDajK9ANZF30Dzf4Qf164B1DjGsALu+FJx/QxFr2DdAJjT39o+wopmcJIvNZHSAhW1hrnbYgAw==", type="MSACT"',
             'content-length': '0',
             'content-type': 'application/json; charset=utf-8',
             'ms-cv': 'KuShXJ9KPtofsBEMa/qu+q.95',
@@ -478,36 +481,27 @@ class TMOutlook:
             'x-req-source': 'Mail',
             'x-tenantid': '84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa',
         }
-        response = self.session.post(url, headers=headers) 
+        response = self.session.post(url, headers=headers)
         print(response.status_code)
         if response.status_code == 200:
             print(response.json())
 
-if __name__ == "__main__":
+@app.route('/')
+def home():
+    return "Bot is running"
+
+def start_bot():
     data = load_accounts('email.txt')
-    header_order = [
-        "sec-ch-ua",
-        "sec-ch-ua-mobile",
-        "sec-ch-ua-platform",
-        "origin",
-        "upgrade-insecure-requests",
-        "content-type",
-        "user-agent",
-        "accept",
-        "sec-fetch-site",
-        "sec-fetch-mode",
-        "sec-fetch-user",
-        "sec-fetch-dest",
-        "accept-encoding",
-        "accept-language",
-        "cookie",
-        "priority"
-    ]
     for i in range(1):
-        tmoutlook = TMOutlook(
-            account=data[i]
-        )
+        tmoutlook = TMOutlook(account=data[i])
         process = threading.Thread(target=tmoutlook.run, args=())
         log(f'Starting Bot ')
         process.start()
         time.sleep(3)
+
+if __name__ == "__main__":
+    # Start the bot in a separate thread
+    threading.Thread(target=start_bot, daemon=True).start()
+    # Start Flask server
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False)
